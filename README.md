@@ -17,6 +17,7 @@ myapp
 ├── .gitignore
 ├── Cargo.toml          # written by `cargo init`
 ├── benches/
+│   └── .gitkeep        # so the empty directory survives the first commit
 ├── examples/
 │   └── hello.rs
 ├── src/
@@ -78,6 +79,7 @@ $ ruststruct --dry-run --git myapp
   myapp/tests/
 [dry-run] files        :
   myapp/.gitignore
+  myapp/benches/.gitkeep
   myapp/examples/hello.rs
   myapp/src/lib.rs
   myapp/src/main.rs
@@ -110,12 +112,14 @@ project. Both keys are optional.
 
 ## Why this project exists
 
-`ruststruct` is a deliberate port of [`gostruct`](https://github.com/AstonMarty13),
-a small Go CLI of mine that does the same job for Go projects. Rewriting a tool I
-already knew inside out turned the exercise into a direct comparison of the two
-languages, rather than a tour of syntax.
+`ruststruct` is a deliberate port of
+[`gostruct`](https://github.com/AstonMarty13/gostruct), a small Go CLI of mine
+that does the same job for Go projects. Rewriting a tool I already knew inside
+out turned the exercise into a comparison of the two languages rather than a tour
+of syntax — and the traffic went both ways: the `.gitkeep` handling here is
+lifted straight from the Go version, which solved it first.
 
-Four things the type system made better, not just different:
+Three places where the type system did the work, rather than me:
 
 **Rollback is a value, not a discipline.** The Go version tracks a `failed`
 boolean and cleans up in a `defer` — correct only as long as every error path
@@ -123,20 +127,21 @@ remembers to set the flag. Here, a `RollbackGuard` deletes the project root when
 it drops, and the happy path ends with `guard.disarm()`. It fires on `?` and on
 panic, and there is no flag left to forget.
 
-**Ordered maps make the dry run reproducible.** Go randomises map iteration, so
-`gostruct --dry-run` lists directories in a different order on every run.
-Swapping `HashMap` for `BTreeMap`/`BTreeSet` made the output stable — and made it
-possible to assert on it in a test.
+**Ordering is structural, not restated.** Both tools print a stable `--dry-run`
+plan, and both had to do something to get there: `gostruct` collects its maps
+into slices and calls `sort.Strings` at the point of printing. `BTreeMap` and
+`BTreeSet` push that guarantee down into the container instead, so the ordering
+holds for every future traversal without anyone having to remember to re-sort.
+`dry_run_output_is_deterministic` pins the behaviour either way — the difference
+is where the invariant lives, not whether it holds today.
 
 **Errors carry data instead of prose.** `fmt.Errorf("...: %w", err)` produces a
 message; a `#[derive(Error)]` enum produces a value a caller can match on. The
-rendered text is the same, the tests are not: they assert `Error::UnsafePath(_)`
-rather than grepping a string.
-
-**`&Path` beats `string`.** Path components are inspectable, so refusing anything
-that is not `Component::Normal` is three lines — and it closes a hole the Go
-version still has, where a config entry of `"../../.zshrc"` writes outside the
-project.
+rendered text is much the same, the tests are not: they assert
+`Error::UnsafePath(_)` rather than grepping a string. That variant exists because
+`&Path` is inspectable — refusing every component that is not `Component::Normal`
+takes three lines and stops a config entry of `"../../.zshrc"` from writing
+outside the project.
 
 The crate also holds itself to `#![forbid(unsafe_code)]`, `clippy::pedantic`, and
 `missing_docs`, all enforced as errors in CI.
@@ -158,7 +163,7 @@ binary is a thin shell around it.
 ## Development
 
 ```bash
-cargo test --all-features                                  # 36 tests
+cargo test --all-features                                  # 39 tests
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -166,10 +171,18 @@ cargo fmt --all -- --check
 CI runs the lints, the MSRV check, and the test suite on Linux, macOS, and
 Windows.
 
-Two of the tests are worth pointing at: `generated_project_compiles_and_passes_its_own_tests`
-runs `cargo test` inside a freshly scaffolded project, because a scaffolder that
-emits code which does not build is worthless; and `dry_run_output_is_deterministic`
-generates the same plan ten times and asserts the output never moves.
+Three of the tests are worth pointing at, all of them checking the output rather
+than the code that produced it:
+
+- `generated_project_compiles_and_passes_its_own_tests` runs `cargo test` inside
+  a freshly scaffolded project, because a scaffolder that emits code which does
+  not build is worthless.
+- `every_directory_survives_a_first_commit` scaffolds, `git add -A`, commits, and
+  asserts every default directory is still tracked. Asserting that `.gitkeep`
+  files exist would have tested the implementation; this tests the reason they
+  exist.
+- `dry_run_output_is_deterministic` generates the same plan ten times and asserts
+  the output never moves.
 
 ## License
 

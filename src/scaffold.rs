@@ -206,25 +206,48 @@ pub fn scaffold(opts: &ScaffoldOptions, out: &mut impl Write) -> Result<()> {
     files.extend(opts.files.clone());
 
     // 4. Explicit directories, plus every parent implied by a file path.
-    let mut dirs: BTreeSet<&Path> = opts.dirs.iter().map(Path::new).collect();
+    let mut dirs: BTreeSet<PathBuf> = opts.dirs.iter().map(PathBuf::from).collect();
     for path in files.keys().map(Path::new) {
         if let Some(parent) = path.parent()
             && parent != Path::new("")
         {
-            dirs.insert(parent);
+            dirs.insert(parent.to_path_buf());
         }
     }
 
     // 5. Nothing from the config may escape the root.
-    for path in dirs.iter().copied().chain(files.keys().map(Path::new)) {
+    for path in dirs
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(files.keys().map(Path::new))
+    {
         if !is_safe_relative(path) {
             return Err(Error::UnsafePath(path.to_path_buf()));
         }
     }
 
+    // 6. Git cannot track an empty directory, so a scaffolded `benches/` would
+    //    vanish on the first commit. Give any directory that would otherwise be
+    //    empty a `.gitkeep`.
+    //
+    //    `Path::starts_with` matches whole components, so a file `srcgen/x.rs`
+    //    does not count as content for a directory `src`.
+    let placeholders: Vec<String> = dirs
+        .iter()
+        .filter(|dir| {
+            !files
+                .keys()
+                .any(|file| Path::new(file).starts_with(dir.as_path()))
+        })
+        .map(|dir| dir.join(".gitkeep").to_string_lossy().into_owned())
+        .collect();
+    for path in placeholders {
+        files.insert(path, String::new());
+    }
+
     let init_args = ["init", "--name", name.as_str(), "--vcs", "none"];
 
-    // 6. Dry run: describe, do not act. BTree ordering makes this reproducible.
+    // 7. Dry run: describe, do not act. BTree ordering makes this reproducible.
     if opts.dry_run {
         writeln!(out, "[dry-run] project root : {}", opts.root.display())?;
         writeln!(out, "[dry-run] package name : {name}")?;
@@ -247,14 +270,14 @@ pub fn scaffold(opts: &ScaffoldOptions, out: &mut impl Write) -> Result<()> {
         return Ok(());
     }
 
-    // 7. From here on, any failure must leave the filesystem as it was found.
+    // 8. From here on, any failure must leave the filesystem as it was found.
     std::fs::create_dir_all(&opts.root).map_err(|source| Error::CreateDir {
         path: opts.root.clone(),
         source,
     })?;
     let mut rollback = RollbackGuard::arm(&opts.root);
 
-    // 8. Directories.
+    // 9. Directories.
     for dir in &dirs {
         let full = opts.root.join(dir);
         std::fs::create_dir_all(&full).map_err(|source| Error::CreateDir {
@@ -263,7 +286,7 @@ pub fn scaffold(opts: &ScaffoldOptions, out: &mut impl Write) -> Result<()> {
         })?;
     }
 
-    // 9. Files.
+    // 10. Files.
     for (path, body) in &files {
         let full = opts.root.join(path);
         std::fs::write(&full, body).map_err(|source| Error::WriteFile {
@@ -272,10 +295,10 @@ pub fn scaffold(opts: &ScaffoldOptions, out: &mut impl Write) -> Result<()> {
         })?;
     }
 
-    // 10. Let cargo write Cargo.toml; it picks up the targets we just laid out.
+    // 11. Let cargo write Cargo.toml; it picks up the targets we just laid out.
     run_command(&opts.root, "cargo", &init_args)?;
 
-    // 11. Optional git repository.
+    // 12. Optional git repository.
     if opts.git {
         run_command(&opts.root, "git", &["init"])?;
     }
@@ -360,6 +383,90 @@ mod tests {
 
         // The whole point of a scaffolder: what it emits must build.
         run_command(&root, "cargo", &["test", "--quiet"]).expect("generated project must pass");
+    }
+
+    #[test]
+    fn otherwise_empty_directories_get_a_gitkeep() {
+        let tmp = TempDir::new().unwrap();
+        let root = target(&tmp, "keepapp");
+
+        run(&ScaffoldOptions::new(&root)).unwrap();
+
+        // `benches/` is the one default directory with no template file in it.
+        assert!(root.join("benches/.gitkeep").is_file());
+
+        // Directories that already hold something must not get one.
+        for dir in ["src", "tests", "examples"] {
+            assert!(
+                !root.join(dir).join(".gitkeep").exists(),
+                "{dir}/ has content and should not be padded"
+            );
+        }
+    }
+
+    #[test]
+    fn gitkeep_matches_whole_path_components() {
+        let tmp = TempDir::new().unwrap();
+        let root = target(&tmp, "componentapp");
+
+        // `srcgen/` shares a textual prefix with `src`, but is a different
+        // directory: it is empty and must still get its own placeholder.
+        let config = UserConfig {
+            dirs: vec!["srcgen".to_string()],
+            files: BTreeMap::new(),
+        };
+        run(&ScaffoldOptions::new(&root).with_config(config)).unwrap();
+
+        assert!(root.join("srcgen/.gitkeep").is_file());
+        assert!(!root.join("src/.gitkeep").exists());
+    }
+
+    #[test]
+    fn every_directory_survives_a_first_commit() {
+        let tmp = TempDir::new().unwrap();
+        let root = target(&tmp, "committed");
+
+        let mut opts = ScaffoldOptions::new(&root);
+        opts.git = true;
+        run(&opts).unwrap();
+
+        run_command(&root, "git", &["add", "-A"]).unwrap();
+
+        // Identity is passed inline so the test does not depend on the machine's
+        // global git config, and signing is off so it never blocks on a key.
+        run_command(
+            &root,
+            "git",
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+
+        let output = Command::new("git")
+            .arg("ls-files")
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let tracked: Vec<&str> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .collect();
+
+        for dir in DEFAULT_DIRS {
+            assert!(
+                tracked.iter().any(|f| Path::new(f).starts_with(dir)),
+                "{dir}/ vanished on the first commit; tracked: {tracked:?}"
+            );
+        }
     }
 
     #[test]
