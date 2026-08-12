@@ -35,6 +35,17 @@ lib/bin split with an example and an integration test already wired up.
 
 ## Install
 
+Pre-built binaries for Linux, macOS and Windows (x86_64 and aarch64) are
+attached to every [release](https://github.com/AstonMarty13/ruststruct/releases),
+with a `SHA256SUMS` file alongside them:
+
+```bash
+curl -sSL https://github.com/AstonMarty13/ruststruct/releases/latest/download/ruststruct-v0.1.0-macos-aarch64.tar.gz | tar xz
+sudo mv ruststruct-v0.1.0-macos-aarch64/ruststruct /usr/local/bin/
+```
+
+With a Rust toolchain to hand:
+
 ```bash
 cargo install --git https://github.com/AstonMarty13/ruststruct
 ```
@@ -169,7 +180,8 @@ cargo fmt --all -- --check
 ```
 
 CI runs the lints, the MSRV check, and the test suite on Linux, macOS, and
-Windows.
+Windows. Pushing a `v*` tag builds the five release targets and publishes them
+with checksums.
 
 Three of the tests are worth pointing at, all of them checking the output rather
 than the code that produced it:
